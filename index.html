@@ -10,14 +10,13 @@
 <style>
   :root { --y:#f4c11d; --bg:#161a28; --card:rgba(20,24,38,.94); }
   * { box-sizing:border-box; }
-  html,body { margin:0; height:100%; background:var(--bg); overflow:hidden; font-family:Rubik,system-ui,sans-serif; color:#fff; }
-  body { display:flex; align-items:center; justify-content:center; }
-  canvas { display:block; touch-action:none; cursor:crosshair; }
-  .panel { position:fixed; inset:0; display:flex; align-items:center; justify-content:center; pointer-events:none; padding:16px; }
+  html,body { margin:0; height:100%; background:var(--bg); overflow:hidden; font-family:Rubik,system-ui,sans-serif; color:#fff; user-select:none; }
+  canvas#cv { position:fixed; inset:0; display:block; width:100vw; height:100vh; }
+  .panel { position:fixed; inset:0; display:flex; align-items:center; justify-content:center; pointer-events:none; padding:16px; z-index:10; }
   .card { pointer-events:auto; background:var(--card); border:3px solid var(--y); border-radius:22px; padding:22px 24px; width:min(430px,100%);
           box-shadow:0 20px 60px rgba(0,0,0,.5); max-height:100%; overflow:auto; }
   .card.wide { width:min(640px,100%); }
-  .logo { font-weight:900; font-size:44px; line-height:.95; color:var(--y); font-style:italic; text-shadow:3px 3px 0 #c0392b; letter-spacing:.5px; }
+  .logo { font-weight:900; font-size:44px; line-height:.95; color:var(--y); font-style:italic; text-shadow:3px 3px 0 #c0392b; }
   .sub { color:#b9c0d4; font-size:14px; margin:8px 0 14px; }
   .h { font-weight:900; font-size:28px; color:var(--y); margin-bottom:6px; }
   label { display:block; font-size:13px; color:#b9c0d4; margin-bottom:12px; }
@@ -35,6 +34,7 @@
   .row button.big { margin-bottom:0; }
   .err { color:#ff8a80; font-weight:700; min-height:18px; font-size:14px; }
   .help { color:#8a92ab; font-size:12.5px; line-height:1.5; margin-top:10px; border-top:1px solid #2a3048; padding-top:10px; }
+  .help a { color:#b9c0d4; }
   .codeRow { font-size:20px; display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
   .codeRow b { color:var(--y); font-size:34px; letter-spacing:6px; }
   .busLabel { font-size:12px; color:#8a92ab; margin-bottom:6px; }
@@ -49,21 +49,64 @@
   .stats div { display:flex; justify-content:space-between; padding:6px 0; border-bottom:1px dashed #2a3048; font-size:15px; }
   .stats b { color:var(--y); }
   .stats .total { font-size:20px; border-bottom:none; }
-  #leanBtn { position:fixed; right:16px; bottom:16px; width:96px; height:96px; border-radius:50%; font-size:15px; opacity:.85; z-index:5; }
   .hidden { display:none !important; }
-  @media (max-width:560px) {
-    .seats { grid-template-columns:repeat(2,1fr); }
-    .logo { font-size:36px; }
-  }
+
+  /* HUD */
+  #hud { position:fixed; left:12px; right:12px; top:10px; height:78px; background:rgba(20,24,38,.82); border-radius:16px; display:flex; align-items:center; gap:24px; padding:0 22px; z-index:5; pointer-events:none; }
+  #hud .lbl { font-size:12px; color:#8a92ab; font-weight:700; letter-spacing:.5px; }
+  #hudScore { font-size:34px; font-weight:900; line-height:1; }
+  #route { flex:1; position:relative; height:52px; }
+  #route .line { position:absolute; left:0; right:0; top:25px; height:6px; border-radius:3px; background:#3a4160; }
+  #route .fill { position:absolute; left:0; top:25px; height:6px; border-radius:3px; background:var(--y); }
+  #route .stop { position:absolute; top:21px; width:14px; height:14px; margin-left:-7px; border-radius:50%; background:#3a4160; }
+  #route .stop.on { background:var(--y); }
+  #route .nm { position:absolute; font-size:11px; font-weight:700; color:#8a92ab; transform:translateX(-50%); white-space:nowrap; }
+  #route .nm.on { color:#fff; }
+  #route .bus { position:absolute; top:19px; width:28px; height:18px; margin-left:-14px; border-radius:5px; background:var(--y); border:3px solid #1e1e1e; }
+  #anger { width:min(260px,24vw); }
+  #angerBar { position:relative; height:24px; border-radius:12px; background:#2a2f45; overflow:hidden; margin-top:6px; }
+  #angerFill { position:absolute; left:0; top:0; bottom:0; width:0; background:linear-gradient(90deg,#ffd54f,#ff1744); border-radius:12px; }
+  #angerPct { position:absolute; right:10px; top:3px; font-weight:900; font-size:14px; }
+  #anger.hot #angerBar { box-shadow:0 0 0 3px #ff1744; }
+  #cross { position:fixed; left:50%; top:50%; width:8px; height:8px; margin:-4px 0 0 -4px; border-radius:50%; background:rgba(255,255,255,.85); box-shadow:0 0 0 2px rgba(0,0,0,.35); z-index:5; pointer-events:none; transition:transform .08s; }
+  #cross.can { transform:scale(2.2); background:#ffe066; }
+  #cross.hold { transform:scale(1.6); background:#7CFC7C; }
+  #hint { position:fixed; left:50%; bottom:14px; transform:translateX(-50%); background:rgba(0,0,0,.55); padding:6px 14px; border-radius:12px; font-size:13px; font-weight:700; z-index:5; pointer-events:none; white-space:nowrap; }
+  #lockMsg { position:fixed; left:50%; top:58%; transform:translateX(-50%); background:rgba(20,24,38,.9); border:2px solid var(--y); padding:12px 20px; border-radius:14px; font-weight:800; z-index:6; pointer-events:none; text-align:center; }
+  #banner { position:fixed; left:0; right:0; top:24%; text-align:center; font-size:56px; font-weight:900; color:var(--y); z-index:6; pointer-events:none;
+            -webkit-text-stroke:3px #1a1d2b; text-shadow:0 4px 0 #1a1d2b; opacity:0; }
+  #banner.go { animation:ban 1.7s ease-out forwards; }
+  @keyframes ban { 0%{opacity:0;transform:scale(.6)} 10%{opacity:1;transform:scale(1.15)} 18%{transform:scale(1)} 80%{opacity:1} 100%{opacity:0} }
+  #fx { position:fixed; inset:0; pointer-events:none; z-index:4; overflow:hidden; }
+  .bub { position:absolute; transform:translate(-50%,-100%); background:#fff; color:#111; border:2px solid #222; border-radius:12px; padding:5px 10px; font-weight:700; font-size:15px; white-space:nowrap; }
+  .bub::after { content:''; position:absolute; left:50%; bottom:-9px; margin-left:-6px; border:6px solid transparent; border-top-color:#222; }
+  .pop { position:absolute; transform:translate(-50%,-50%); font-weight:900; font-size:24px; -webkit-text-stroke:1.5px #000; white-space:nowrap; }
 </style>
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "cannon-es": "https://cdn.jsdelivr.net/npm/cannon-es@0.20.0/dist/cannon-es.js"
+} }
+</script>
 </head>
 <body>
 <canvas id="cv"></canvas>
+<div id="fx"></div>
+
+<div id="hud" class="hidden">
+  <div><div class="lbl">РЕЙТИНГ</div><div id="hudScore">0</div></div>
+  <div id="route"></div>
+  <div id="anger"><div class="lbl">СКАНДАЛ</div><div id="angerBar"><div id="angerFill"></div><div id="angerPct">0%</div></div></div>
+</div>
+<div id="cross" class="hidden"></div>
+<div id="hint" class="hidden">Мышь — смотреть и тянуться · ЛКМ держать — схватить · ПКМ — швырнуть · Пробел — наклониться · 1–5 — крикнуть</div>
+<div id="lockMsg" class="hidden">Кликни по экрану, чтобы взять управление<br><span style="font-weight:500;font-size:13px;color:#b9c0d4">Esc — отпустить мышь</span></div>
+<div id="banner"></div>
 
 <div id="menu" class="panel">
   <div class="card">
     <div class="logo">ПЕРЕДАЙТЕ<br>ЗА ПРОЕЗД</div>
-    <div class="sub">Кооперативный хаос в маршрутке на 1–4 человек</div>
+    <div class="sub">Кооперативный хаос в маршрутке на 1–4 человек. От первого лица.</div>
     <label>Как тебя звать
       <input id="name" maxlength="14" placeholder="Пассажир" autocomplete="off">
     </label>
@@ -75,8 +118,9 @@
     <button id="btnSolo" class="big ghost">Покататься с ботами</button>
     <div id="menuErr" class="err"></div>
     <div class="help">
-      <b>Мышь</b> — рука · <b>зажми ЛКМ</b> — схватить, отпусти — бросить · <b>Пробел / ПКМ</b> — наклониться к полу · <b>1–5</b> — крикнуть<br>
-      Деньги — водителю в кассу. Сдачу и вещи — назад, на галёрку. Огурцы не ронять.
+      <b>Мышь</b> — смотреть, рука тянется туда же · <b>зажми ЛКМ</b> — схватить, отпусти — бросить · <b>ПКМ</b> — швырнуть · <b>Пробел</b> — наклониться к полу · <b>1–5</b> — крикнуть<br>
+      Деньги — водителю в кассу. Сдачу и вещи — назад, на галёрку. Огурцы не ронять.<br>
+      Нужен компьютер с мышью. <a href="2d/">2D-версия</a>
     </div>
   </div>
 </div>
@@ -86,14 +130,14 @@
     <div class="h">Маршрутка подана</div>
     <div class="codeRow">Код: <b id="lobbyCode">----</b> <button id="btnCopy" class="ghost small">Скопировать ссылку</button></div>
     <div id="lobbyStatus" class="sub">Подключаемся…</div>
-    <div class="busLabel">◀ водитель &nbsp;·&nbsp; места спереди назад</div>
+    <div class="busLabel">места от водителя назад</div>
     <div id="seats" class="seats"></div>
     <div class="row">
       <button id="btnStart" class="big">Поехали!</button>
       <button id="btnLeave" class="big ghost">Выйти</button>
     </div>
     <div id="waitHost" class="sub hidden">Ждём, пока водитель тронется…</div>
-    <div class="help">Пустые места займут боты. Созвонитесь голосом — орать «ПЕРЕДАЙ!» обязательно.</div>
+    <div class="help">Пустые места займут боты. Созвонитесь голосом — орать «ПЕРЕДАЙ!» обязательно. Хосту не сворачивать вкладку: физика считается у него.</div>
   </div>
 </div>
 
@@ -110,9 +154,12 @@
   </div>
 </div>
 
-<button id="leanBtn" class="hidden">Наклон</button>
-
-<script src="https://cdnjs.cloudflare.com/ajax/libs/matter-js/0.19.0/matter.min.js"></script>
-<script src="game.js"></script>
+<script type="module" src="game.js"></script>
+<script>
+  // если 3D-библиотеки не догрузились с CDN — подсказать, а не молчать
+  setTimeout(function () {
+    if (!window.__pzp) document.getElementById('menuErr').textContent = 'Игра не загрузилась до конца — обнови страницу (Ctrl+F5).';
+  }, 12000);
+</script>
 </body>
 </html>

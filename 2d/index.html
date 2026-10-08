@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<title>Передайте за проезд</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Rubik:wght@500;700;800;900&display=swap" rel="stylesheet">
+<style>
+  :root { --y:#f4c11d; --bg:#161a28; --card:rgba(20,24,38,.94); }
+  * { box-sizing:border-box; }
+  html,body { margin:0; height:100%; background:var(--bg); overflow:hidden; font-family:Rubik,system-ui,sans-serif; color:#fff; }
+  body { display:flex; align-items:center; justify-content:center; }
+  canvas { display:block; touch-action:none; cursor:crosshair; }
+  .panel { position:fixed; inset:0; display:flex; align-items:center; justify-content:center; pointer-events:none; padding:16px; }
+  .card { pointer-events:auto; background:var(--card); border:3px solid var(--y); border-radius:22px; padding:22px 24px; width:min(430px,100%);
+          box-shadow:0 20px 60px rgba(0,0,0,.5); max-height:100%; overflow:auto; }
+  .card.wide { width:min(640px,100%); }
+  .logo { font-weight:900; font-size:44px; line-height:.95; color:var(--y); font-style:italic; text-shadow:3px 3px 0 #c0392b; letter-spacing:.5px; }
+  .sub { color:#b9c0d4; font-size:14px; margin:8px 0 14px; }
+  .h { font-weight:900; font-size:28px; color:var(--y); margin-bottom:6px; }
+  label { display:block; font-size:13px; color:#b9c0d4; margin-bottom:12px; }
+  input { width:100%; margin-top:6px; padding:12px 14px; border-radius:12px; border:2px solid #3a4160; background:#0f1220; color:#fff; font:700 17px Rubik,sans-serif; outline:none; }
+  input:focus { border-color:var(--y); }
+  #code { text-transform:uppercase; letter-spacing:4px; text-align:center; margin-top:0; }
+  button { font:800 16px Rubik,sans-serif; border:none; border-radius:12px; padding:12px 16px; background:var(--y); color:#1a1d2b; cursor:pointer; transition:transform .08s; }
+  button:hover { transform:translateY(-1px); filter:brightness(1.07); }
+  button:active { transform:translateY(1px); }
+  button.big { width:100%; font-size:19px; padding:14px; margin-bottom:10px; }
+  button.ghost { background:transparent; color:#fff; border:2px solid #3a4160; }
+  button.small { padding:6px 10px; font-size:13px; }
+  .row { display:flex; gap:10px; margin-bottom:10px; }
+  .row > * { flex:1; }
+  .row button.big { margin-bottom:0; }
+  .err { color:#ff8a80; font-weight:700; min-height:18px; font-size:14px; }
+  .help { color:#8a92ab; font-size:12.5px; line-height:1.5; margin-top:10px; border-top:1px solid #2a3048; padding-top:10px; }
+  .codeRow { font-size:20px; display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
+  .codeRow b { color:var(--y); font-size:34px; letter-spacing:6px; }
+  .busLabel { font-size:12px; color:#8a92ab; margin-bottom:6px; }
+  .seats { display:grid; grid-template-columns:repeat(4,1fr); gap:8px; margin-bottom:14px; }
+  .seat { background:#0f1220; border-radius:12px; padding:10px; border-top:6px solid var(--c); min-height:96px; display:flex; flex-direction:column; gap:6px; }
+  .seat .sn { font-size:11px; color:#8a92ab; text-transform:uppercase; }
+  .seat .who { font-weight:700; font-size:15px; word-break:break-word; }
+  .seat .who span { color:#8a92ab; font-weight:500; font-size:12px; }
+  .seat.me { outline:2px solid var(--c); }
+  .seat button { margin-top:auto; padding:6px; font-size:12px; }
+  .rank { font-size:18px; font-weight:800; margin-bottom:10px; }
+  .stats div { display:flex; justify-content:space-between; padding:6px 0; border-bottom:1px dashed #2a3048; font-size:15px; }
+  .stats b { color:var(--y); }
+  .stats .total { font-size:20px; border-bottom:none; }
+  #leanBtn { position:fixed; right:16px; bottom:16px; width:96px; height:96px; border-radius:50%; font-size:15px; opacity:.85; z-index:5; }
+  .hidden { display:none !important; }
+  @media (max-width:560px) {
+    .seats { grid-template-columns:repeat(2,1fr); }
+    .logo { font-size:36px; }
+  }
+</style>
+</head>
+<body>
+<canvas id="cv"></canvas>
+
+<div id="menu" class="panel">
+  <div class="card">
+    <div class="logo">ПЕРЕДАЙТЕ<br>ЗА ПРОЕЗД</div>
+    <div class="sub">Кооперативный хаос в маршрутке на 1–4 человек</div>
+    <label>Как тебя звать
+      <input id="name" maxlength="14" placeholder="Пассажир" autocomplete="off">
+    </label>
+    <button id="btnCreate" class="big">Создать маршрутку</button>
+    <div class="row">
+      <input id="code" maxlength="4" placeholder="КОД" autocomplete="off">
+      <button id="btnJoin">Войти по коду</button>
+    </div>
+    <button id="btnSolo" class="big ghost">Покататься с ботами</button>
+    <div id="menuErr" class="err"></div>
+    <div class="help">
+      <b>Мышь</b> — рука · <b>зажми ЛКМ</b> — схватить, отпусти — бросить · <b>Пробел / ПКМ</b> — наклониться к полу · <b>1–5</b> — крикнуть<br>
+      Деньги — водителю в кассу. Сдачу и вещи — назад, на галёрку. Огурцы не ронять.
+    </div>
+  </div>
+</div>
+
+<div id="lobby" class="panel hidden">
+  <div class="card wide">
+    <div class="h">Маршрутка подана</div>
+    <div class="codeRow">Код: <b id="lobbyCode">----</b> <button id="btnCopy" class="ghost small">Скопировать ссылку</button></div>
+    <div id="lobbyStatus" class="sub">Подключаемся…</div>
+    <div class="busLabel">◀ водитель &nbsp;·&nbsp; места спереди назад</div>
+    <div id="seats" class="seats"></div>
+    <div class="row">
+      <button id="btnStart" class="big">Поехали!</button>
+      <button id="btnLeave" class="big ghost">Выйти</button>
+    </div>
+    <div id="waitHost" class="sub hidden">Ждём, пока водитель тронется…</div>
+    <div class="help">Пустые места займут боты. Созвонитесь голосом — орать «ПЕРЕДАЙ!» обязательно.</div>
+  </div>
+</div>
+
+<div id="end" class="panel hidden">
+  <div class="card">
+    <div id="endTitle" class="h"></div>
+    <div id="endRank" class="rank"></div>
+    <div id="endStats" class="stats"></div>
+    <div class="row" style="margin-top:14px">
+      <button id="btnAgain" class="big">Ещё рейс</button>
+      <button id="btnMenu" class="big ghost">В меню</button>
+    </div>
+    <div id="endWait" class="sub hidden">Ждём, пока водитель решит ехать ещё…</div>
+  </div>
+</div>
+
+<button id="leanBtn" class="hidden">Наклон</button>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/matter-js/0.19.0/matter.min.js"></script>
+<script src="game.js"></script>
+</body>
+</html>
