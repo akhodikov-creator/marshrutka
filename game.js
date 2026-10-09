@@ -726,32 +726,121 @@ const NET = {
   hostRoute: null,     // гость: через какую сеть и какого пира идёт хост
 };
 const MODS = {};
+const NET_MODE = new URLSearchParams(location.search).get('net');
+const FORCE_RELAY = NET_MODE === 'relay' || NET_MODE === 'local';
 async function loadNets() {
+  if (FORCE_RELAY) return [];
   await Promise.allSettled(STRATS.map(async k => { if (!MODS[k]) MODS[k] = await import(TRYSTERO(k)); }));
   return STRATS.filter(k => MODS[k]);
 }
+// ---------- запасной канал: ретранслятор через публичные MQTT-брокеры ----------
+// Если прямое WebRTC-соединение не выходит (мобильный интернет, строгий NAT), всё идёт через брокер.
+const MQTT_URL = 'https://cdn.jsdelivr.net/npm/mqtt@5.10.1/dist/mqtt.esm.js';
+const RELAY_BROKERS = location.protocol === 'https:'
+  ? ['wss://broker.hivemq.com:8884/mqtt', 'wss://broker.emqx.io:8084/mqtt']
+  : ['ws://broker.hivemq.com:8000/mqtt', 'ws://broker.emqx.io:8083/mqtt'];
+const NET_NAMES = { mqtt: 'MQTT', torrent: 'торренты', nostr: 'Nostr' };
+let MQTT = null;
+// комната с тем же интерфейсом, что у Trystero: makeAction / onPeerJoin / onPeerLeave / leave
+async function makeRelayRoom(code, selfId) {
+  if (!MQTT) MQTT = (await import(MQTT_URL)).default;
+  const topic = 'pzp3d/v1/' + code;
+  const clients = [], handlers = {}, joinCbs = [], leaveCbs = [];
+  const peers = new Map(), seen = new Map();
+  let n = 0;
+  const onMsg = (t, payload) => {
+    let m;
+    try { m = JSON.parse(payload.toString()); } catch (e) { return; }
+    if (!m || !m.f || m.f === selfId) return;
+    if (m.to && !m.to.includes(selfId)) return;
+    const key = m.f + ':' + m.n;
+    if (seen.has(key)) return;            // одно и то же пришло через два брокера
+    seen.set(key, 1);
+    if (seen.size > 1000) seen.delete(seen.keys().next().value);
+    const fresh = !peers.has(m.f);
+    peers.set(m.f, performance.now());
+    if (fresh) joinCbs.forEach(cb => cb(m.f));
+    if (m.a !== '__ping' && handlers[m.a]) handlers[m.a](m.d, m.f);
+  };
+  // ?net=local — проверка логики ретранслятора между вкладками одного браузера, без брокера
+  if (NET_MODE === 'local') {
+    const bc = new BroadcastChannel(topic), subs = [];
+    bc.onmessage = e => onMsg(topic, { toString: () => e.data });
+    clients.push({ connected: true, publish: (t, msg) => bc.postMessage(msg), end: () => bc.close() });
+  }
+  for (const url of NET_MODE === 'local' ? [] : RELAY_BROKERS) {
+    try {
+      const c = MQTT.connect(url, { reconnectPeriod: 3000, connectTimeout: 8000, keepalive: 30, clientId: 'pzp_' + Math.random().toString(16).slice(2, 12) });
+      c.on('connect', () => c.subscribe(topic, { qos: 0 }));
+      c.on('message', onMsg);
+      c.on('error', () => {});
+      clients.push(c);
+    } catch (e) {}
+  }
+  const send = (a, d, to) => {
+    const msg = JSON.stringify({ f: selfId, n: ++n, a, d, to: to == null ? undefined : (Array.isArray(to) ? to : [to]) });
+    for (const c of clients) if (c.connected) c.publish(topic, msg, { qos: 0 });
+  };
+  const timer = setInterval(() => {
+    send('__ping', 0);
+    const now = performance.now();
+    for (const [pr, t] of peers) if (now - t > 10000) { peers.delete(pr); leaveCbs.forEach(cb => cb(pr)); }
+  }, 2000);
+  return {
+    makeAction: name => [(d, to) => send(name, d, to), cb => { handlers[name] = cb; }],
+    onPeerJoin: cb => joinCbs.push(cb),
+    onPeerLeave: cb => leaveCbs.push(cb),
+    connected: () => clients.some(c => c.connected),
+    leave: () => { clearInterval(timer); clients.forEach(c => { try { c.end(true); } catch (e) {} }); },
+  };
+}
+// состояние каналов связи — для подсказок в лобби и при поиске
+function netStatus() {
+  const parts = [];
+  for (const k of STRATS) {
+    const m = MODS[k];
+    if (!m || !m.getRelaySockets) continue;
+    let socks = [];
+    try { socks = Object.values(m.getRelaySockets() || {}); } catch (e) {}
+    const ok = socks.filter(x => x && (x.readyState === 1 || x.connected === true)).length;
+    parts.push(NET_NAMES[k] + ' ' + ok + '/' + socks.length);
+  }
+  const rr = NET.rooms.find(r => r.relay);
+  parts.push('ретранслятор ' + (rr && rr.room.connected() ? '✓' : '✗'));
+  return parts.join(' · ');
+}
+// код могли набрать русскими буквами-двойниками
+const CYR = { А: 'A', В: 'B', Е: 'E', К: 'K', М: 'M', Н: 'H', О: 'O', Р: 'P', С: 'C', Т: 'T', У: 'Y', Х: 'X', Ё: 'E' };
+const toLatinCode = c => String(c).toUpperCase().replace(/[А-ЯЁ]/g, ch => CYR[ch] || '').replace(/[^A-Z]/g, '').slice(0, 4);
+
 function newPid() { return 'p' + Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4); }
 
 function genCode() { const a = 'ABCDEFGHJKLMNPRSTUVWXYZ'; let s = ''; for (let i = 0; i < 4; i++) s += a[Math.floor(Math.random() * a.length)]; return s; }
 
-function openRooms(kinds, code, wire) {
+function addRoom(kind, room, wire) {
+  const [sendSt, getSt] = room.makeAction('st');
+  const [sendIn, getIn] = room.makeAction('in');
+  const [sendCtl, getCtl] = room.makeAction('ctl');
+  const r = { kind, room, sendSt, sendIn, sendCtl, relay: kind === 'relay', tick: 0 };
+  NET.rooms.push(r);
+  wire(r, { getSt, getIn, getCtl });
+  return r;
+}
+function openRooms(kinds, code, wire, selfId) {
   for (const k of kinds) {
-    try {
-      const room = MODS[k].joinRoom({ appId: APP_ID, rtcConfig: RTC }, code);
-      const [sendSt, getSt] = room.makeAction('st');
-      const [sendIn, getIn] = room.makeAction('in');
-      const [sendCtl, getCtl] = room.makeAction('ctl');
-      const r = { kind: k, room, sendSt, sendIn, sendCtl };
-      NET.rooms.push(r);
-      wire(r, { getSt, getIn, getCtl });
-    } catch (e) { console.warn('сеть', k, e); }
+    try { addRoom(k, MODS[k].joinRoom({ appId: APP_ID, rtcConfig: RTC }, code), wire); }
+    catch (e) { console.warn('сеть', k, e); }
   }
+  const role = NET.role;
+  makeRelayRoom(code, selfId).then(room => {
+    if (NET.role !== role || NET.code !== code) { room.leave(); return; }
+    addRoom('relay', room, wire);
+  }).catch(e => console.warn('ретранслятор', e));
 }
 
 async function hostCreate(name) {
   menuError('Подаём маршрутку…');
   const kinds = await loadNets();
-  if (!kinds.length) { menuError('Сетевая библиотека не загрузилась — попробуй «Покататься с ботами»'); return; }
   menuError('');
   NET.role = 'host'; NET.myPid = 'host'; NET.code = genCode(); NET.routes.clear(); NET.rooms = [];
   resetSeats(); addPlayer('host', name);
@@ -760,6 +849,9 @@ async function hostCreate(name) {
   $('lobbyCode').textContent = NET.code;
   $('lobbyStatus').textContent = 'Маршрутка ждёт пассажиров. Скинь друзьям код или ссылку.';
   $('btnStart').classList.remove('hidden'); $('waitHost').classList.add('hidden');
+  NET.timers.push(setInterval(() => {
+    if (NET.role === 'host' && PHASE === 'lobby') $('lobbyStatus').textContent = 'Маршрутка ждёт пассажиров. Связь: ' + netStatus();
+  }, 2000));
   openRooms(kinds, NET.code, (r, a) => {
     a.getCtl((d, peer) => onHostCtl(r, peer, d));
     a.getIn((d, peer) => {
@@ -770,7 +862,7 @@ async function hostCreate(name) {
       const pid = pidByRoute(r, peer);
       if (pid) { NET.routes.delete(pid); removePlayer(pid); }
     });
-  });
+  }, 'H' + newPid());
 }
 function pidByRoute(r, peer) {
   for (const [pid, rt] of NET.routes) if (rt.r === r && rt.peer === peer) return pid;
@@ -799,27 +891,33 @@ function broadcast(pkt) {
   for (const r of NET.rooms) {
     const peers = [];
     for (const rt of NET.routes.values()) if (rt.r === r) peers.push(rt.peer);
-    if (peers.length) { try { r.sendSt(pkt, peers); } catch (e) {} }
+    if (!peers.length) continue;
+    if (r.relay && (r.tick = (r.tick + 1) % 2)) continue; // через брокер — 15 раз в секунду
+    try { r.sendSt(pkt, peers); } catch (e) {}
   }
 }
 
 function clientSend(kind, d) {
   const h = NET.hostRoute;
   if (NET.role !== 'client' || !h) return;
+  if (kind === 'in' && h.r.relay && (h.r.tick = (h.r.tick + 1) % 2)) return;
   try { (kind === 'in' ? h.r.sendIn : h.r.sendCtl)(d, h.peer); } catch (e) {}
 }
 
 async function clientJoin(name, code) {
-  code = code.toUpperCase().replace(/[^A-Z]/g, '');
-  if (code.length !== 4) { menuError('Код — 4 латинские буквы'); return; }
+  code = toLatinCode(code);
+  if (code.length !== 4) { menuError('Код — 4 буквы, например KHTB'); return; }
   menuError('Ищем маршрутку ' + code + '… (может занять до минуты)');
   const kinds = await loadNets();
-  if (!kinds.length) { menuError('Сетевая библиотека не загрузилась'); return; }
   NET.role = 'client'; NET.code = code; NET.latest = null; NET.lastFx = 0; NET.gotSeat = false; NET.hostRoute = null; NET.rooms = [];
   NET.myPid = newPid();
   const hello = (r, peer) => { try { r.sendCtl({ t: 'hello', name, pid: NET.myPid }, peer); } catch (e) {} };
   openRooms(kinds, code, (r, a) => {
-    r.room.onPeerJoin(peer => hello(r, peer));
+    // через ретранслятор стучимся, только если напрямую за 5 секунд не пустили
+    r.room.onPeerJoin(peer => {
+      if (!r.relay) hello(r, peer);
+      else setTimeout(() => { if (NET.role === 'client' && !NET.gotSeat) hello(r, peer); }, 5000);
+    });
     a.getSt((d, peer) => {
       const h = NET.hostRoute;
       if (h && (h.r !== r || h.peer !== peer)) return;
@@ -831,11 +929,19 @@ async function clientJoin(name, code) {
       const h = NET.hostRoute;
       if (h && h.r === r && h.peer === peer && NET.role === 'client') { leave(); menuError('Водитель уехал без вас (хост отключился)'); }
     });
-  });
+  }, NET.myPid);
+  // пока ищем — показываем, какие каналы связи живы
+  const t0 = performance.now();
+  NET.timers.push(setInterval(() => {
+    if (NET.role !== 'client' || NET.latest) return;
+    const sec = (performance.now() - t0) / 1000;
+    menuError('Ищем маршрутку ' + code + '… ' + Math.round(sec) + ' с. Связь: ' + netStatus() +
+      (sec > 15 ? '. Если долго — проверь код; офисный интернет может блокировать игру, попробуй домашний или раздачу с телефона.' : ''));
+  }, 1000));
   // пока хост не посадил — повторяем приветствие
   NET.timers.push(setInterval(() => { if (!NET.gotSeat && NET.hostRoute) hello(NET.hostRoute.r, NET.hostRoute.peer); }, 1000));
   NET.timers.push(setTimeout(() => {
-    if (NET.role === 'client' && !NET.latest) { leave(); menuError('Маршрутка ' + code + ' не найдена. Проверь код и что хост в лобби. Если сеть рабочая/офисная — она может резать соединение.'); }
+    if (NET.role === 'client' && !NET.latest) { leave(); menuError('Маршрутка ' + code + ' не найдена. Проверь код и что хост в лобби (вкладку у хоста не сворачивать). Офисный/рабочий интернет часто блокирует такие игры — попробуйте домашний или раздачу с телефона.'); }
   }, 60000));
 }
 
@@ -1921,12 +2027,13 @@ function getName() {
 }
 try { $('name').value = localStorage.getItem('pzp_name') || ''; } catch (e) {}
 const qRoom = new URLSearchParams(location.search).get('room');
-if (qRoom) $('code').value = qRoom.toUpperCase();
+if (qRoom) $('code').value = toLatinCode(qRoom);
 const resetCam = () => { CAM.yaw = 0; CAM.pitch = -0.25; CAM.dist = 0.9; };
 
 $('btnCreate').onclick = () => { audioUnlock(); menuError(''); hostCreate(getName()); };
 $('btnJoin').onclick = () => { audioUnlock(); resetCam(); clientJoin(getName(), $('code').value); };
 $('code').addEventListener('keydown', e => { if (e.key === 'Enter') $('btnJoin').click(); });
+$('code').addEventListener('input', e => { const v = toLatinCode(e.target.value); if (v !== e.target.value) e.target.value = v; });
 $('btnSolo').onclick = () => {
   audioUnlock(); menuError('');
   NET.role = 'solo'; NET.myPid = 'host';
