@@ -72,6 +72,8 @@
   #cross { position:fixed; left:50%; top:50%; width:8px; height:8px; margin:-4px 0 0 -4px; border-radius:50%; background:rgba(255,255,255,.85); box-shadow:0 0 0 2px rgba(0,0,0,.35); z-index:5; pointer-events:none; transition:transform .08s; }
   #cross.can { transform:scale(2.2); background:#ffe066; }
   #cross.hold { transform:scale(1.6); background:#7CFC7C; }
+  #cross.give { transform:scale(2.4); background:#3fa7ff; }
+  #act { position:fixed; left:50%; top:calc(50% + 34px); transform:translateX(-50%); background:rgba(20,24,38,.85); border:2px solid var(--y); color:#fff; padding:5px 12px; border-radius:10px; font-weight:800; font-size:15px; z-index:5; pointer-events:none; white-space:nowrap; }
   #hint { position:fixed; left:50%; bottom:14px; transform:translateX(-50%); background:rgba(0,0,0,.55); padding:6px 14px; border-radius:12px; font-size:13px; font-weight:700; z-index:5; pointer-events:none; white-space:nowrap; }
   #pause .card { width:min(400px,100%); }
   .set { display:flex; align-items:center; gap:10px; margin:8px 0; font-size:14px; color:#b9c0d4; }
@@ -110,15 +112,16 @@
 </div>
 <div id="cross" class="hidden"></div>
 <div id="charge" class="hidden"><div id="chargeFill"></div></div>
-<div id="hint" class="hidden">ЛКМ — схватить · ПКМ держать — замах и бросок · колесо — рука ближе/дальше · Пробел — к полу · Q/E — вбок · 1–5 — крикнуть · Esc — пауза</div>
+<div id="act" class="hidden"></div>
+<div id="hint" class="hidden">Смотри на вещь — ЛКМ взять · смотри на соседа — ЛКМ передать · ПКМ — швырнуть · Пробел — к полу · Q/E — вбок · 1–5 — крикнуть · Esc — пауза</div>
 <div id="pause" class="panel hidden">
   <div class="card">
     <div class="h">Пауза</div>
     <div class="keys">
       <b>Мышь</b> — смотреть, рука тянется туда же<br>
-      <b>ЛКМ</b> — схватить (под прицелом подсветится), отпустить — бросить<br>
+      Наведи прицел на вещь — она подсветится, <b>ЛКМ</b> — взять<br>
+      С вещью в руке наведи на соседа (или водителя / тётю сзади) — <b>ЛКМ</b> — передать<br>
       <b>ПКМ</b> — держать для замаха, отпустить — швырнуть<br>
-      <b>Колесо</b> — рука ближе / дальше<br>
       <b>Пробел</b> — нагнуться к полу · <b>Q / E</b> — потянуться влево / вправо<br>
       <b>1–5</b> — крикнуть
     </div>
@@ -148,7 +151,7 @@
     <button id="btnSolo" class="big ghost">Покататься с ботами</button>
     <div id="menuErr" class="err"></div>
     <div class="help">
-      <b>Мышь</b> — смотреть, рука тянется туда же · <b>ЛКМ</b> — схватить, отпусти — бросить · <b>ПКМ</b> — замах и бросок · <b>колесо</b> — рука ближе/дальше · <b>Пробел</b> — к полу · <b>Q/E</b> — вбок · <b>1–5</b> — крикнуть<br>
+      <b>Смотри на вещь + ЛКМ</b> — взять · <b>смотри на соседа + ЛКМ</b> — передать · <b>ПКМ</b> — швырнуть · <b>Пробел</b> — к полу · <b>Q/E</b> — вбок · <b>1–5</b> — крикнуть<br>
       Деньги — водителю в кассу. Сдачу и вещи — назад, на галёрку. Огурцы не ронять.<br>
       Нужен компьютер с мышью. <a href="2d/">2D-версия</a>
     </div>
@@ -184,7 +187,7 @@
   </div>
 </div>
 
-<script type="module" src="game.js?v=4"></script>
+<script type="module" src="game.js?v=9"></script>
 <script>
   // если 3D-библиотеки не догрузились с CDN — подсказать, а не молчать
   setTimeout(function () {

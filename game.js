@@ -144,7 +144,7 @@ let fxLog = [], fxId = 0;
 const prog = () => clamp(G.time / ROUND, 0, 1);
 const DBG = {};
 const dbg = k => { DBG[k] = (DBG[k] || 0) + 1; };
-const patience = () => 38 - 12 * prog();
+const patience = () => 26 - 9 * prog();
 
 function newGame() {
   world = new CANNON.World({ gravity: new CANNON.Vec3(0, -9.82, 0) });
@@ -230,53 +230,93 @@ function hostStep(dt) {
   afterPhysics(dt);
 }
 
+// ---------- руки: «посмотри и кликни» ----------
+// holder: 0..3 — в руке пассажира, 9 — у тёти на галёрке, -3 — летит в точку it.fly, -1 — лежит свободно
+const RECV_PT = { d: TRAY_C, n: BACK_DROP };
+function canReach(s, p, lean, yaw) {
+  return dist3(p, shoulder(s, lean, yaw)) <= (lean ? LEAN_REACH : REACH) + 0.15 || dist3(p, shoulder(s, 0)) <= REACH + 0.15;
+}
+// кому можно передать с места s: соседям по цепочке, водителю (с первого места), галёрке (с последнего)
+function receiversOf(s) {
+  const r = [];
+  if (s > 0) r.push(s - 1);
+  if (s < 3) r.push(s + 1);
+  if (s === 0) r.push('d');
+  if (s === 3) r.push('n');
+  return r;
+}
+function recvPoint(to) {
+  if (to === 'd' || to === 'n') return RECV_PT[to];
+  const S = SEATS[to];
+  return { x: S.x - 0.05, y: 1.05, z: S.z };
+}
+
 function applyInput(s) {
   const i = inputs[s], h = hands[s];
   if (i.x == null) return;
-  h.tx = i.x; h.ty = i.y; h.tz = i.z; h.grab = !!i.g; h.lean = leanMode(i.l);
+  h.tx = i.x; h.ty = i.y; h.tz = i.z; h.lean = leanMode(i.l);
   h.yaw = i.yw || 0; h.pitch = i.pt || 0;
   if (i.th !== h.lastTh) { if (h.lastTh !== undefined) throwHeld(s, i.tp ?? 0.6); h.lastTh = i.th; }
+  if (i.aq !== h.lastAq) { if (h.lastAq !== undefined && i.a) doAction(s, i.a); h.lastAq = i.aq; }
+}
+
+// a: { k: 'grab', id } | { k: 'give', to } | { k: 'drop', x, y, z }
+function doAction(s, a) {
+  if (PHASE !== 'play' || !a) return;
+  const h = hands[s];
+  if (a.k === 'grab' && !h.held) {
+    const it = items.find(q => q.id === a.id && !q.dead);
+    if (it && (it.holder === -1 || it.holder === 9) && h.noGrab <= 0 && canReach(s, it.body.position, h.lean, h.yaw)) grabItem(s, it);
+  } else if (a.k === 'give' && h.held) giveTo(s, a.to);
+  else if (a.k === 'drop' && h.held) {
+    const it = h.held, p = it.body.position;
+    release(s);
+    it.body.velocity.set((+a.x - p.x) * 2.5, 0.4, (+a.z - p.z) * 2.5);
+  }
+}
+
+function grabItem(s, it) {
+  it.holder = s; it.touched = true; it.heldSince = G.time; it.fly = null;
+  hands[s].held = it;
+  if (seats[s].bot && Math.random() < 0.12) say(s, pick(BOT_LINES[bots[s].kind].give));
+}
+
+function giveTo(s, to) {
+  const it = hands[s].held;
+  if (!it || !receiversOf(s).includes(to)) return;
+  release(s);
+  it.ignore[s] = G.time + 2.5;
+  // у соседа рука свободна — вещь перелетает прямо к нему в руку
+  if (typeof to === 'number' && !hands[to].held) { grabItem(to, it); return; }
+  // руки заняты — кладём ему на колени; водителю — в кассу, галёрке — тёте
+  const S = typeof to === 'number' ? SEATS[to] : null;
+  it.holder = -3; it.flyT = 0;
+  it.fly = S ? { x: S.x - 0.12, y: 0.75, z: S.z } : { ...RECV_PT[to] };
 }
 
 function updateHands(dt) {
   for (let s = 0; s < 4; s++) {
     const h = hands[s], bot = seats[s].bot;
     const t = clampHand(s, { x: h.tx, y: h.ty, z: h.tz }, h.lean, h.yaw);
-    let k = bot ? bots[s].speed : 0.35;
+    let k = bot ? bots[s].speed * 2 : 0.35;
     if (h.held && TYPES[h.held.type].heavy) k *= 0.45;
     h.x += (t.x - h.x) * k; h.y += (t.y - h.y) * k; h.z += (t.z - h.z) * k;
     h.jx *= 0.85; h.jy *= 0.85; h.jz *= 0.85;
     const hp = { x: h.x + h.jx, y: h.y + h.jy, z: h.z + h.jz };
     h.rx = hp.x; h.ry = hp.y; h.rz = hp.z;
     h.noGrab = Math.max(0, h.noGrab - dt);
-    if (PHASE === 'play') {
-      const fresh = h.grab && !h.prev;
-      if (h.grab && !h.held && h.noGrab <= 0) tryGrab(s, fresh, hp);
-      if (!h.grab && h.held) release(s);
-      if (h.held) {
-        const b = h.held.body, p = b.position;
-        b.velocity.set((hp.x - p.x) * 20, (hp.y - p.y) * 20, (hp.z - p.z) * 20);
-        b.angularVelocity.scale(0.6, b.angularVelocity);
-        if (dist3(hp, p) > 0.35) { const it = h.held; release(s); it.ignore[s] = G.time + 3; dbg('far'); }
-      }
+    if (PHASE === 'play' && h.held) {
+      // вещь в руке догоняет ладонь (и так же «перелетает» от соседа)
+      const b = h.held.body, p = b.position;
+      let vx = (hp.x - p.x) * 20, vy = (hp.y - p.y) * 20, vz = (hp.z - p.z) * 20;
+      const sp = Math.hypot(vx, vy, vz);
+      if (sp > 7) { vx *= 7 / sp; vy *= 7 / sp; vz *= 7 / sp; }
+      b.velocity.set(vx, vy, vz);
+      b.angularVelocity.scale(0.6, b.angularVelocity);
+      if (G.time - h.held.heldSince > 0.6 && dist3(hp, p) > 0.35) { const it = h.held; release(s); it.ignore[s] = G.time + 3; dbg('far'); }
     }
-    h.prev = h.grab;
+    h.grab = !!h.held;
   }
-}
-
-function tryGrab(s, fresh, hp) {
-  let best = null, bd = 1e9;
-  for (const it of items) {
-    if (it.dead || it.holder === s) continue;
-    if (it.holder >= 0 && it.holder < 4 && !fresh) continue; // отобрать можно только свежим хватом
-    const d = dist3(it.body.position, hp) - itemRad(it.type) * 0.6;
-    if (d < 0.1 && d < bd) { bd = d; best = it; }
-  }
-  if (!best) return;
-  if (best.holder >= 0 && best.holder < 4) { hands[best.holder].held = null; bots[best.holder].hold = 0; }
-  best.holder = s; best.touched = true; best.heldSince = G.time; best.offered = false;
-  hands[s].held = best;
-  if (seats[s].bot && Math.random() < 0.15) say(s, pick(BOT_LINES[bots[s].kind].give));
 }
 
 function release(s) {
@@ -302,13 +342,13 @@ function throwHeld(s, power = 0.6) {
 // ---------- боты-пассажиры ----------
 function botRest(s) {
   const S = SEATS[s], h = hands[s];
-  h.tx = S.x - 0.15; h.ty = 0.68; h.tz = S.z; h.grab = false; h.lean = 0;
+  h.tx = S.x - 0.15; h.ty = 0.68; h.tz = S.z; h.lean = 0;
   h.yaw *= 0.95; h.pitch += (-0.15 - h.pitch) * 0.05;
 }
 
-function botLook(s) {
+function botLookAt(s, t) {
   const h = hands[s], hp = headPos(s, h.lean, h.yaw);
-  const dx = h.tx - hp.x, dy = h.ty - hp.y, dz = h.tz - hp.z;
+  const dx = t.x - hp.x, dy = t.y - hp.y, dz = t.z - hp.z;
   const yaw = Math.atan2(dz, -dx), pitch = Math.atan2(dy, Math.hypot(dx, dz));
   h.yaw += clamp(yaw - h.yaw, -0.08, 0.08); h.pitch += (pitch - h.pitch) * 0.1;
 }
@@ -316,43 +356,23 @@ function botLook(s) {
 function botThink(s, dt) {
   const b = bots[s], h = hands[s];
   if (h.held) {
-    const it = h.held, dir = it.dest === 'front' ? -1 : 1, sh = shoulder(s, false);
-    const terminal = (dir < 0 && s === 0) || (dir > 0 && s === 3);
-    let t;
-    if (b.park) {
-      // кладём своё на колени, чтобы освободить руку
-      const S = SEATS[s];
-      t = { x: S.x - 0.12, y: 0.7, z: S.z };
-      h.tx = t.x; h.ty = t.y; h.tz = t.z; h.lean = 0; h.grab = true;
-      botLook(s);
-      if (dist3(h, t) < 0.08) { h.grab = false; b.park = false; it.ignore[s] = G.time + 1.5; dbg('park'); }
-      return;
-    }
-    if (terminal) t = dir < 0 ? { ...TRAY_C } : { ...BACK_DROP };
-    else {
-      const ns = shoulder(s + dir, false);
-      const vx = ns.x - sh.x, vz = ns.z - sh.z, l = Math.hypot(vx, vz);
-      t = { x: sh.x + vx / l * (REACH - 0.08), y: 1.0, z: sh.z + vz / l * (REACH - 0.08) };
-    }
-    h.tx = t.x; h.ty = t.y; h.tz = t.z; h.lean = 0; h.grab = true;
-    botLook(s);
-    if (dist3(h, t) < 0.08) {
-      b.hold += dt;
-      if (!terminal) it.offered = true;
-      // сосед сам тянет мне вещь навстречу — у обоих заняты руки
-      const n = s + dir, nh = !terminal && hands[n] && hands[n].held;
-      const clinch = nh && nh.offered && (nh.dest === 'front' ? -1 : 1) === -dir;
-      if (terminal && b.hold > 0.3) h.grab = false;
-      else if (clinch && b.hold > 0.4 && it.dest === 'back') b.park = true;
-      else if (b.hold > b.patience) {
-        if (seats[n] && seats[n].bot) b.park = true;
-        else { h.grab = false; it.ignore[s] = G.time + 2.5; dbg('patience' + s); }
-        if (Math.random() < 0.6) say(s, 'Ну бери уже!');
-      }
-    } else b.hold = 0;
+    const it = h.held, dir = it.dest === 'front' ? -1 : 1;
+    const S = SEATS[s];
+    h.tx = S.x - 0.35; h.ty = 0.95; h.tz = S.z; h.lean = 0;     // держит перед собой
+    if (b.giveT == null) { b.giveT = rand(b.delay[0], b.delay[1]) * 1.2; b.wrong = b.kind === 'student' && Math.random() < 0.12; }
+    let to = (dir < 0 && s === 0) ? 'd' : (dir > 0 && s === 3) ? 'n' : s + dir;
+    if (b.wrong && typeof to === 'number' && s - dir >= 0 && s - dir < 4) to = s - dir;
+    botLookAt(s, recvPoint(to));
+    b.giveT -= dt;
+    if (b.giveT > 0) return;
+    // у соседа заняты руки — немного подождём, потом всё равно кинем ему на колени
+    if (typeof to === 'number' && hands[to].held && b.giveT > -1.5) return;
+    if (b.wrong) say(s, 'Ой, не туда…');
+    giveTo(s, to);
+    b.giveT = null;
     return;
   }
-  b.hold = 0; b.park = false;
+  b.giveT = null;
   const it = botTarget(s);
   if (!it) {
     b.cur = null; botRest(s);
@@ -361,13 +381,14 @@ function botThink(s, dt) {
     return;
   }
   const p = it.body.position;
-  h.tx = p.x; h.ty = p.y; h.tz = p.z;
-  botLook(s);
+  botLookAt(s, p);
   if (b.cur !== it) { b.cur = it; b.t = rand(b.delay[0], b.delay[1]); }
-  if (b.t > 0) { b.t -= dt; h.grab = false; const S = SEATS[s]; h.tx = S.x - 0.15; h.ty = 0.68; h.tz = S.z; return; }
+  b.t -= dt;
+  if (b.t > 0) { const S = SEATS[s]; h.tx = S.x - 0.15; h.ty = 0.68; h.tz = S.z; return; }
+  h.tx = p.x; h.ty = p.y; h.tz = p.z;
   h.lean = dist3(p, shoulder(s, false)) > REACH - 0.06 ? 1 : 0;
-  h.grab = dist3(h, p) < 0.12;
-  if (h.grab) b.patience = rand(2, 3.5);
+  // дотянулся — взял (или потянулся достаточно долго)
+  if (dist3(h, p) < 0.15 || b.t < -0.8) { grabItem(s, it); b.cur = null; }
 }
 
 function botTarget(s) {
@@ -375,6 +396,7 @@ function botTarget(s) {
   let best = null, bs = 1e9;
   for (const it of items) {
     if (it.dead || (it.ignore[s] || 0) > G.time) continue;
+    if (it.holder !== -1 && it.holder !== 9) continue;
     const p = it.body.position, dir = it.dest === 'front' ? -1 : 1;
     const d = dist3(p, sh);
     if (d > REACH - 0.04 && dist3(p, shoulder(s, true, Math.atan2(p.z - sh.z, sh.x - p.x))) > LEAN_REACH - 0.06) continue;
@@ -383,17 +405,7 @@ function botTarget(s) {
       if (dir < 0 && p.x < sh.x - REACH * 0.55) continue;
       if (dir > 0 && p.x > sh.x + REACH * 0.55) continue;
     }
-    const hd = it.holder;
-    if (hd >= 0 && hd < 4) {
-      const toward = dir < 0 ? hd > s : hd < s;
-      if (!toward) continue;
-      if (seats[hd].bot) { if (!it.offered) continue; }
-      else {
-        if (G.time - it.heldSince < 0.5 || d > REACH * 0.85) continue;
-        if (dir < 0 ? p.x > SEATS[hd].x - 0.25 : p.x < SEATS[hd].x + 0.25) continue;
-      }
-    }
-    if (hd === -1 && ((inFront(p) && dir < 0) || (inBack(p) && dir > 0))) continue;
+    if (it.holder === -1 && ((inFront(p) && dir < 0) || (inBack(p) && dir > 0))) continue;
     const sc = d + (it.type === 'fare' && G.time - it.born > 20 ? -0.4 : 0);
     if (sc < bs) { bs = sc; best = it; }
   }
@@ -447,18 +459,18 @@ function bump(mag, label) {
     h.jy += rand(0.08, 0.16) * mag; h.jx += rand(-0.04, 0.04) * mag; h.jz += rand(-0.04, 0.04) * mag;
     if (!h.held) continue;
     const heavy = !!TYPES[h.held.type].heavy;
-    if ((seats[s].bot && Math.random() < bots[s].fumble * 0.6 * mag) || (!seats[s].bot && heavy && Math.random() < 0.25 * mag)) {
+    if ((seats[s].bot && Math.random() < bots[s].fumble * 0.6 * mag) || (!seats[s].bot && Math.random() < (heavy ? 0.25 * mag : mag > 1.3 ? 0.35 : 0))) {
       const it = h.held; release(s); it.ignore[s] = G.time + 1.5; dbg('fumble');
-      say(s, seats[s].bot ? pick(BOT_LINES[bots[s].kind].drop) : 'Тяжёлое!!');
+      say(s, seats[s].bot ? pick(BOT_LINES[bots[s].kind].drop) : heavy ? 'Тяжёлое!!' : 'Ой, выронил!');
     }
   }
 }
 
 function board() {
   const p = prog();
-  G.fareQueue += 1 + Math.floor(Math.random() * (2 + p * 2.5));
-  if (Math.random() < 0.4 + p * 0.4) spawnSpecial();
-  if (Math.random() < p * 0.5) G.timers.push({ at: G.time + 2, fn: spawnSpecial });
+  G.fareQueue += 2 + Math.floor(Math.random() * (3 + p * 3.5));
+  if (Math.random() < 0.7 + p * 0.3) spawnSpecial();
+  if (Math.random() < 0.3 + p * 0.6) G.timers.push({ at: G.time + 2, fn: spawnSpecial });
   say('npc', 'Передайте за проезд!');
 }
 
@@ -471,10 +483,10 @@ function spawnLogic(dt) {
   if (u > 6 && u < SEG - 3) {
     G.nextMid -= dt;
     if (G.nextMid <= 0) {
-      G.nextMid = rand(10, 16) * (1 - 0.4 * prog());
+      G.nextMid = rand(5, 8.5) * (1 - 0.4 * prog());
       G.fareQueue++;
       say('npc', pick(['Ой, я ж не передал!', 'Передайте, пожалуйста!', 'За двоих передайте!']));
-      if (Math.random() < 0.2 + 0.4 * prog()) spawnSpecial();
+      if (Math.random() < 0.3 + 0.4 * prog()) spawnSpecial();
     }
   }
 }
@@ -518,6 +530,14 @@ function afterPhysics(dt) {
       pos.set(clamp(pos.x, 0.4, BUS_LEN - 0.4), clamp(pos.y, 0.3, BUS_H - 0.3), clamp(pos.z, -0.8, 0.8));
       b.velocity.set(0, 0, 0);
     }
+    if (it.holder === -3 && it.fly) {
+      const f = it.fly; it.flyT += dt;
+      let vx = (f.x - pos.x) * 6, vy = (f.y - pos.y) * 6 + 0.6, vz = (f.z - pos.z) * 6;
+      const sp = Math.hypot(vx, vy, vz);
+      if (sp > 5) { vx *= 5 / sp; vy *= 5 / sp; vz *= 5 / sp; }
+      b.velocity.set(vx, vy, vz);
+      if (dist3(pos, f) < 0.08 || it.flyT > 1.2) { it.holder = -1; it.fly = null; b.velocity.set(0, -0.5, 0); }
+    }
     if (it.holder === 9) {
       const sp = SLOTS[it.slot];
       b.velocity.set((sp.x - pos.x) * 8, (sp.y - pos.y) * 8, (sp.z - pos.z) * 8);
@@ -534,7 +554,7 @@ function afterPhysics(dt) {
       if (it.flapT <= 0) {
         it.flapT = rand(1.2, 3); snd(TT.wriggle);
         if (it.holder === -1) b.velocity.set(b.velocity.x + rand(-2, 2), b.velocity.y + rand(2, 3.5), b.velocity.z + rand(-2, 2));
-        else if (it.holder < 4) {
+        else if (it.holder >= 0 && it.holder < 4) {
           const s = it.holder, h = hands[s];
           h.jx += rand(-0.15, 0.15); h.jy += rand(-0.1, 0.1); h.jz += rand(-0.15, 0.15);
           if (Math.random() < 0.2) { release(s); h.noGrab = 0.4; say(s, it.type === 'pug' ? 'Собака вырвалась!' : 'Гусь вырвался!'); }
@@ -744,7 +764,7 @@ async function hostCreate(name) {
     a.getCtl((d, peer) => onHostCtl(r, peer, d));
     a.getIn((d, peer) => {
       const pid = pidByRoute(r, peer), s = pid ? seatOf(pid) : -1;
-      if (s >= 0) inputs[s] = { x: d.x / 1000, y: d.y / 1000, z: d.z / 1000, g: !!d.g, l: d.l | 0, yw: d.yw / 1000, pt: d.pt / 1000, th: d.th, tp: (d.tp ?? 60) / 100 };
+      if (s >= 0) inputs[s] = { x: d.x / 1000, y: d.y / 1000, z: d.z / 1000, l: d.l | 0, yw: d.yw / 1000, pt: d.pt / 1000, th: d.th, tp: (d.tp ?? 60) / 100, a: d.a, aq: d.aq };
     });
     r.room.onPeerLeave(peer => {
       const pid = pidByRoute(r, peer);
@@ -876,7 +896,7 @@ function requestSeat(i) {
   else clientSend('ctl', { t: 'seat', s: i });
 }
 
-const RANKS = [[0, 'Заяц без билета'], [100, 'Пассажир со стажем'], [200, 'Мастер передачи'], [300, 'Король галёрки'], [420, 'Легенда маршрута №13']];
+const RANKS = [[0, 'Заяц без билета'], [200, 'Пассажир со стажем'], [400, 'Мастер передачи'], [600, 'Король галёрки'], [800, 'Легенда маршрута №13']];
 function fillEnd(res, st, sc, isHost) {
   show('end');
   $('endTitle').textContent = res === 'win' ? 'Доехали до конечной!' : 'Всех высадили из маршрутки!';
@@ -992,7 +1012,7 @@ try { Object.assign(SETTINGS, JSON.parse(localStorage.getItem('pzp_settings') ||
 function saveSettings() { try { localStorage.setItem('pzp_settings', JSON.stringify(SETTINGS)); } catch (e) {} }
 
 // l: 0 — сидим ровно, 1 — наклон вперёд к полу (Пробел), 2 — влево (Q), 3 — вправо (E)
-const INP = { g: false, l: 0, th: 0, tp: 0.6, charge: null, tgt: null, aim: null, keys: { space: false, q: false, e: false } };
+const INP = { l: 0, th: 0, tp: 0.6, charge: null, tgt: null, aim: null, cand: null, far: false, a: null, aq: 0, keys: { space: false, q: false, e: false } };
 const CAM = { yaw: 0, pitch: -0.25, dist: 0.9 };
 const canvas = $('cv');
 const locked = () => document.pointerLockElement === canvas;
@@ -1006,11 +1026,10 @@ const chargeLevel = () => INP.charge == null ? 0 : clamp((performance.now() - IN
 canvas.addEventListener('mousedown', e => {
   audioUnlock();
   if (!locked()) { if (playingSeated()) lockMouse(); return; }
-  if (e.button === 0) INP.g = true;
+  if (e.button === 0 && INP.cand) { INP.a = INP.cand; INP.aq++; }
   if (e.button === 2) INP.charge = performance.now();
 });
 addEventListener('mouseup', e => {
-  if (e.button === 0) INP.g = false;
   if (e.button === 2 && INP.charge != null) { INP.tp = chargeLevel(); INP.th++; INP.charge = null; }
 });
 canvas.addEventListener('contextmenu', e => e.preventDefault());
@@ -1026,7 +1045,7 @@ document.addEventListener('mousemove', e => {
   CAM.pitch = clamp(CAM.pitch - e.movementY * k, -1.35, 1.2);
 });
 document.addEventListener('pointerlockchange', () => {
-  if (!locked()) { INP.g = false; INP.charge = null; INP.keys = { space: false, q: false, e: false }; updLean(); }
+  if (!locked()) { INP.charge = null; INP.keys = { space: false, q: false, e: false }; updLean(); }
 });
 addEventListener('keydown', e => {
   if (e.target.tagName === 'INPUT') return;
@@ -1043,7 +1062,7 @@ addEventListener('keyup', e => {
   if (e.code === 'KeyE') INP.keys.e = false;
   updLean();
 });
-addEventListener('blur', () => { INP.g = false; INP.charge = null; INP.keys = { space: false, q: false, e: false }; updLean(); });
+addEventListener('blur', () => { INP.charge = null; INP.keys = { space: false, q: false, e: false }; updLean(); });
 function shout(i) {
   if (NET.role === 'host' || NET.role === 'solo') doShout(seatOf(NET.myPid), i);
   else clientSend('ctl', { t: 'say', i });
@@ -1675,7 +1694,11 @@ function updateHUD(v, my, canGrab, holding) {
   const playing = v.ph === 'play' && my >= 0, lk = locked();
   $('hint').classList.toggle('hidden', !(playing && lk));
   $('pause').classList.toggle('hidden', !(playing && !lk));
-  $('cross').className = (playing && lk ? '' : 'hidden ') + (holding ? 'hold' : canGrab ? 'can' : '');
+  $('cross').className = (playing && lk ? '' : 'hidden ') + (INP.cand && INP.cand.k === 'give' ? 'give' : holding ? 'hold' : canGrab ? 'can' : '');
+  const act = !(playing && lk) ? '' : INP.cand ? (INP.cand.k === 'drop' ? 'ЛКМ — положить · ПКМ — швырнуть' : 'ЛКМ — ' + INP.cand.label)
+    : holding ? 'Посмотри на соседа, чтобы передать · ПКМ — швырнуть' : INP.far ? 'Далеко — нагнись (Пробел) или потянись (Q/E)' : '';
+  if ($('act').textContent !== act) $('act').textContent = act;
+  $('act').classList.toggle('hidden', !act);
   const ch = chargeLevel();
   $('charge').classList.toggle('hidden', !(playing && lk && INP.charge != null));
   $('chargeFill').style.width = ch * 100 + '%';
@@ -1710,27 +1733,59 @@ function rayTargets(my, v) {
   for (const it of v.items) if (it.holder !== my) { const m = itemMeshes.get(it.id); if (m) t.push(m); }
   return t;
 }
-// куда тянуть свою руку: к предмету под прицелом (если зажат хват) или в точку взгляда
+const ITEM_TITLE = {
+  fare: 'деньги', coin: 'сдачу', soup: 'суп', cake: 'торт', jar: 'огурцы', goose: 'гуся', cactus: 'кактус',
+  pug: 'мопса', fish: 'рыбу', pumpkin: 'тыкву', bottle: 'кефир', pizza: 'пиццу', bread: 'батон',
+};
+const angTo = (hp, d, p) => {
+  const vx = p.x - hp.x, vy = p.y - hp.y, vz = p.z - hp.z, l = Math.hypot(vx, vy, vz) || 1;
+  return Math.acos(clamp((vx * d.x + vy * d.y + vz * d.z) / l, -1, 1));
+};
+// решаем, что сделает клик, и куда тянуть руку
 function computeMyTarget(my, v) {
   const lean = INP.l, d = lookDir(CAM.yaw, CAM.pitch), hp = headPos(my, lean, CAM.yaw);
   const sh = shoulder(my, lean, CAM.yaw), reach = (lean ? LEAN_REACH : REACH) + 0.12;
-  const mine = v.items.some(it => it.holder === my);
-  INP.aim = null;
-  if (!mine) {
-    let bestA = 0.2;
-    for (const it of v.items) {
-      if (it.holder === my || dist3(it, sh) > reach) continue;
-      const vx = it.x - hp.x, vy = it.y - hp.y, vz = it.z - hp.z, l = Math.hypot(vx, vy, vz) || 1;
-      const a = Math.acos(clamp((vx * d.x + vy * d.y + vz * d.z) / l, -1, 1));
-      if (a < bestA) { bestA = a; INP.aim = it.id; }
+  const held = v.items.find(it => it.holder === my);
+  INP.cand = null; INP.aim = null; INP.far = false;
+  if (held) {
+    // смотрим на того, кому отдать
+    let best = null, bestA = 0.45;
+    for (const to of receiversOf(my)) {
+      const pts = to === 'd' ? [TRAY_C, { x: 0.8, y: 1.2, z: 0.5 }] : to === 'n' ? [BACK_DROP, { x: 5.0, y: 1.1, z: 0 }] : [recvPoint(to), { x: SEATS[to].x, y: 1.3, z: SEATS[to].z }];
+      for (const pt of pts) { const a = angTo(hp, d, pt); if (a < bestA) { bestA = a; best = to; } }
     }
-    if (INP.aim != null && INP.g) { const it = v.items.find(q => q.id === INP.aim); return { x: it.x, y: it.y, z: it.z }; }
+    if (best !== null) {
+      const nm = best === 'd' ? 'водителю в кассу' : best === 'n' ? 'тёте на галёрку' : (v.seats[best] ? v.seats[best].name : 'соседу');
+      INP.cand = { k: 'give', to: best, label: 'передать ' + ITEM_TITLE[held.type] + ' → ' + nm };
+    }
+  } else {
+    // ищем вещь под прицелом
+    let bestA = 0.22;
+    for (const it of v.items) {
+      if (it.holder >= 0 && it.holder < 4) continue;
+      if (it.holder === -3) continue;
+      if (dist3(it, hp) > 2.2) continue;
+      const a = angTo(hp, d, it);
+      if (a < bestA) { bestA = a; INP.aim = it; }
+    }
+    if (INP.aim) {
+      if (dist3(INP.aim, sh) <= reach || dist3(INP.aim, shoulder(my, 0)) <= REACH + 0.12) INP.cand = { k: 'grab', id: INP.aim.id, label: 'взять ' + ITEM_TITLE[INP.aim.type] + (INP.aim.type === 'fare' ? ' (' + INP.aim.val + '₽)' : '') };
+      else INP.far = true;
+    }
   }
   ray.set(new THREE.Vector3(hp.x, hp.y, hp.z), new THREE.Vector3(d.x, d.y, d.z));
   ray.far = 2.5;
   const hits = ray.intersectObjects(rayTargets(my, v), true).filter(h => h.object.type !== 'Sprite');
-  const far = hits.length ? Math.min(hits[0].distance - 0.05, CAM.dist) : CAM.dist;
-  return { x: hp.x + d.x * far, y: hp.y + d.y * far, z: hp.z + d.z * far };
+  const hitD = hits.length ? hits[0].distance : 2.5;
+  if (held && !INP.cand && hitD < 1.6) {
+    const q = hits[0].point;
+    INP.cand = { k: 'drop', x: +q.x.toFixed(3), y: +q.y.toFixed(3), z: +q.z.toFixed(3), label: 'положить сюда' };
+  }
+  // рука: с вещью — держим перед собой; без — тянемся к вещи под прицелом
+  if (held) return { x: hp.x + d.x * 0.42, y: hp.y + d.y * 0.42 - 0.14, z: hp.z + d.z * 0.42 };
+  if (INP.aim && !INP.far) return { x: INP.aim.x, y: INP.aim.y, z: INP.aim.z };
+  const far = Math.min(hitD - 0.05, 0.55);
+  return { x: hp.x + d.x * far, y: hp.y + d.y * far - 0.15, z: hp.z + d.z * far };
 }
 
 function updateScene(v, dt, my) {
@@ -1746,7 +1801,7 @@ function updateScene(v, dt, my) {
       if (srv) { const t = NET.latest.items.find(q => q.id === it.id); if (t) { it.x = myHand.x + (t.x - srv.x); it.y = myHand.y + (t.y - srv.y); it.z = myHand.z + (t.z - srv.z); } }
     }
     if (NET.role !== 'client') myHand = null; // у хоста своя рука и так свежая
-    if (!holding) hint = INP.aim;
+    if (!holding && INP.aim) hint = INP.aim.id;
   }
   syncItems(v, hint);
   const sway = -(v.gx || 0) * 0.12;
@@ -1818,7 +1873,7 @@ function tick(dt) {
     const my = seatOf(NET.myPid);
     if (my >= 0 && curView && curView.ph === 'play') {
       INP.tgt = computeMyTarget(my, curView);
-      inputs[my] = { ...INP.tgt, g: INP.g, l: INP.l, yw: CAM.yaw, pt: CAM.pitch, th: INP.th, tp: INP.tp };
+      inputs[my] = { ...INP.tgt, l: INP.l, yw: CAM.yaw, pt: CAM.pitch, th: INP.th, tp: INP.tp, a: INP.a, aq: INP.aq };
     }
     acc += dt;
     let n = 0;
@@ -1839,7 +1894,7 @@ function tick(dt) {
     inAcc += dt;
     if (inAcc >= 1 / 30 && INP.tgt) {
       inAcc = 0;
-      clientSend('in', { x: mm(INP.tgt.x), y: mm(INP.tgt.y), z: mm(INP.tgt.z), g: INP.g ? 1 : 0, l: INP.l, yw: mm(CAM.yaw), pt: mm(CAM.pitch), th: INP.th, tp: Math.round(INP.tp * 100) });
+      clientSend('in', { x: mm(INP.tgt.x), y: mm(INP.tgt.y), z: mm(INP.tgt.z), l: INP.l, yw: mm(CAM.yaw), pt: mm(CAM.pitch), th: INP.th, tp: Math.round(INP.tp * 100), a: INP.a, aq: INP.aq });
     }
   }
   if (!view) view = idleView();
